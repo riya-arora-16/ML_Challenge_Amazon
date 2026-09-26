@@ -1,136 +1,28 @@
 import pandas as pd
 import re
-from rapidfuzz.fuzz import ratio, token_set_ratio
+from rapidfuzz.fuzz import ratio
 
 NORMALIZED_DIR = r"C:\riya\ML_Challenge\dataset\normalized"
 TRAIN_DIR = r"C:\riya\ML_Challenge\dataset\train"
 VALIDATION_FILE = r"C:\riya\ML_Challenge\dataset\validation\validation_s1_ids.txt"
 
 SAMPLE_SIZE = 5000
+CHUNK_SIZE = 100000
 
 
 # =========================================================
 # Helpers
 # =========================================================
 
-def normalize_id_list(x):
-    if pd.isna(x) or not str(x).strip():
-        return set()
-
-    return set(str(x).split(","))
-
-
-def sim(a, b):
-    if not isinstance(a, str):
-        a = ""
-
-    if not isinstance(b, str):
-        b = ""
-
-    if not a or not b:
-        return 0
-
-    return ratio(a, b) / 100
-
-
-# =========================================================
-# Validation sample
-# =========================================================
-
-print("Loading validation sample...")
-
-val_ids = pd.read_csv(
-    VALIDATION_FILE,
-    dtype=str
-)["source1_entity_id"]
-
-val_ids = set(
-    val_ids.sample(
-        n=SAMPLE_SIZE,
-        random_state=42
-    )
-)
-
-print("Validation S1:", len(val_ids))
-
-
-# =========================================================
-# Load S1
-# =========================================================
-
-print("\nLoading S1...")
-
-s1 = pd.read_csv(
-    f"{NORMALIZED_DIR}\\train_source1.tsv",
-    sep="\t",
-    dtype=str
-)
-
-s1 = s1[
-    s1["entity_id"].isin(val_ids)
-].copy()
-
-s1 = s1.set_index("entity_id")
-
-
-# =========================================================
-# Load S2/S3 records
-# =========================================================
-
-print("Loading S2...")
-
-s2 = pd.read_csv(
-    f"{NORMALIZED_DIR}\\train_source2.tsv",
-    sep="\t",
-    dtype=str
-)
-
-print("Loading S3...")
-
-s3 = pd.read_csv(
-    f"{NORMALIZED_DIR}\\train_source3.tsv",
-    sep="\t",
-    dtype=str
-)
-
-other = pd.concat(
-    [s2, s3],
-    ignore_index=True
-)
-
-other = other.set_index("entity_id")
-
-
-# =========================================================
-# Ground truth
-# =========================================================
-
-print("Loading ground truth...")
-
-gt = pd.read_csv(
-    f"{TRAIN_DIR}\\train_ground_truth.tsv",
-    sep="\t",
-    dtype=str
-)
-
-gt = gt[
-    gt["source1_entity_id"].isin(val_ids)
-].copy()
-
-
-# =========================================================
-# Recreate V2 blocking rules
-# =========================================================
-
 def first_token(x):
-    if not isinstance(x, str):
+    if not isinstance(x, str) or not x:
         return ""
     parts = x.split()
     return parts[0] if parts else ""
 
 
 def last_token(x):
-    if not isinstance(x, str):
+    if not isinstance(x, str) or not x:
         return ""
     parts = x.split()
     return parts[-1] if parts else ""
@@ -150,7 +42,6 @@ def name_first_last(x):
 
     if len(parts) == 0:
         return ""
-
     if len(parts) == 1:
         return parts[0]
 
@@ -161,10 +52,7 @@ def address_number(x):
     if not isinstance(x, str):
         return ""
 
-    m = re.search(
-        r"\b\d+[a-z]?\b",
-        x
-    )
+    m = re.search(r"\b\d+[a-z]?\b", x)
 
     return m.group(0) if m else ""
 
@@ -195,9 +83,114 @@ def address_number_token(x):
     return num + "|" + words[0]
 
 
+def address_prefix6(x):
+    if not isinstance(x, str):
+        return ""
+
+    return x.replace(" ", "")[:6]
+
+
+def similarity(a, b):
+    if not isinstance(a, str):
+        a = ""
+
+    if not isinstance(b, str):
+        b = ""
+
+    if not a or not b:
+        return 0.0
+
+    return ratio(a, b) / 100.0
+
+
 # =========================================================
-# Build indexes
+# 1. Load validation sample
 # =========================================================
+
+print("Loading validation IDs...")
+
+val_ids = pd.read_csv(
+    VALIDATION_FILE,
+    dtype=str
+)["source1_entity_id"]
+
+val_ids = set(
+    val_ids.sample(
+        n=SAMPLE_SIZE,
+        random_state=42
+    )
+)
+
+print("Validation S1:", len(val_ids))
+
+
+# =========================================================
+# 2. Load only the 5K S1 records
+# =========================================================
+
+print("\nLoading S1...")
+
+s1 = pd.read_csv(
+    f"{NORMALIZED_DIR}\\train_source1.tsv",
+    sep="\t",
+    dtype=str,
+    usecols=[
+        "entity_id",
+        "business_name",
+        "business_address",
+        "country",
+        "name_norm",
+        "address_norm"
+    ]
+)
+
+s1 = s1[
+    s1["entity_id"].isin(val_ids)
+].copy()
+
+s1 = s1.set_index("entity_id")
+
+print("S1 records:", len(s1))
+
+
+# =========================================================
+# 3. Load ground truth ONLY for those 5K
+# =========================================================
+
+print("\nLoading ground truth...")
+
+gt = pd.read_csv(
+    f"{TRAIN_DIR}\\train_ground_truth.tsv",
+    sep="\t",
+    dtype=str
+)
+
+gt = gt[
+    gt["source1_entity_id"].isin(val_ids)
+].copy()
+
+gt["matched_entity_ids"] = (
+    gt["matched_entity_ids"]
+    .fillna("")
+)
+
+
+# =========================================================
+# 4. Build the original blocking keys for S1
+# =========================================================
+
+print("\nCreating S1 blocking keys...")
+
+for rule, func, source_col in [
+    ("name_prefix6", name_prefix6, "name_norm"),
+    ("name_first_last", name_first_last, "name_norm"),
+    ("name_first", first_token, "name_norm"),
+    ("address_number", address_number, "address_norm"),
+    ("address_number_token", address_number_token, "address_norm"),
+    ("address_prefix6", address_prefix6, "address_norm"),
+]:
+    s1[rule] = s1[source_col].map(func)
+
 
 RULES = [
     "name_prefix6",
@@ -209,46 +202,11 @@ RULES = [
 ]
 
 
-def add_keys(df):
+# =========================================================
+# 5. Recreate candidate sets for the 5K S1s
+# =========================================================
 
-    df = df.copy()
-
-    df["name_prefix6"] = (
-        df["name_norm"].map(name_prefix6)
-    )
-
-    df["name_first_last"] = (
-        df["name_norm"].map(name_first_last)
-    )
-
-    df["name_first"] = (
-        df["name_norm"].map(first_token)
-    )
-
-    df["address_number"] = (
-        df["address_norm"].map(address_number)
-    )
-
-    df["address_number_token"] = (
-        df["address_norm"].map(address_number_token)
-    )
-
-    df["address_prefix6"] = (
-        df["address_norm"]
-        .fillna("")
-        .str.replace(" ", "", regex=False)
-        .str[:6]
-    )
-
-    return df
-
-
-print("\nCreating keys...")
-
-s1 = add_keys(s1)
-other = add_keys(other.reset_index())
-other = other.set_index("entity_id")
-
+print("\nBuilding candidate indexes...")
 
 indexes = {
     rule: {}
@@ -256,46 +214,151 @@ indexes = {
 }
 
 
+# Only store keys actually needed by our 5K S1 records.
+relevant_keys = {}
+
 for rule in RULES:
 
-    print("Building:", rule)
-
-    temp = {}
-
-    for entity_id, row in other.iterrows():
-
-        key = (
+    relevant_keys[rule] = set(
+        (
             row["country"],
             row[rule]
         )
+        for _, row in s1.iterrows()
+        if row[rule]
+    )
 
-        if not row[rule]:
-            continue
-
-        if key not in temp:
-            temp[key] = []
-
-        temp[key].append(entity_id)
-
-    indexes[rule] = temp
+    print(
+        rule,
+        "relevant keys:",
+        len(relevant_keys[rule])
+    )
 
 
 # =========================================================
-# Find missed matches
+# 6. Process S2/S3 in chunks
+# =========================================================
+
+def process_source(filename):
+
+    print("\nProcessing:", filename)
+
+    path = f"{NORMALIZED_DIR}\\{filename}"
+
+    for chunk_no, chunk in enumerate(
+        pd.read_csv(
+            path,
+            sep="\t",
+            dtype=str,
+            usecols=[
+                "entity_id",
+                "country",
+                "name_norm",
+                "address_norm"
+            ],
+            chunksize=CHUNK_SIZE
+        )
+    ):
+
+        print(
+            f"  Processing chunk {chunk_no + 1}",
+            end="\r"
+        )
+
+        # Create keys
+        chunk["name_prefix6"] = (
+            chunk["name_norm"]
+            .fillna("")
+            .map(name_prefix6)
+        )
+
+        chunk["name_first_last"] = (
+            chunk["name_norm"]
+            .fillna("")
+            .map(name_first_last)
+        )
+
+        chunk["name_first"] = (
+            chunk["name_norm"]
+            .fillna("")
+            .map(first_token)
+        )
+
+        chunk["address_number"] = (
+            chunk["address_norm"]
+            .fillna("")
+            .map(address_number)
+        )
+
+        chunk["address_number_token"] = (
+            chunk["address_norm"]
+            .fillna("")
+            .map(address_number_token)
+        )
+
+        chunk["address_prefix6"] = (
+            chunk["address_norm"]
+            .fillna("")
+            .map(address_prefix6)
+        )
+
+        # Add IDs to indexes only when key is relevant.
+        for rule in RULES:
+
+            relevant = relevant_keys[rule]
+
+            for country, key, entity_id in zip(
+                chunk["country"],
+                chunk[rule],
+                chunk["entity_id"]
+            ):
+
+                if not key:
+                    continue
+
+                lookup = (country, key)
+
+                if lookup not in relevant:
+                    continue
+
+                if lookup not in indexes[rule]:
+                    indexes[rule][lookup] = []
+
+                indexes[rule][lookup].append(entity_id)
+
+        del chunk
+
+    print()
+
+
+process_source("train_source2.tsv")
+process_source("train_source3.tsv")
+
+print("\nCandidate indexes built.")
+
+
+# =========================================================
+# 7. Find which TRUE matches were missed
 # =========================================================
 
 print("\nFinding missed true matches...")
 
-missed = []
+missed_pairs = []
+
+total_true = 0
+retrieved_true = 0
 
 for _, row in gt.iterrows():
 
     s1_id = row["source1_entity_id"]
 
-    if not row["matched_entity_ids"] or pd.isna(
-        row["matched_entity_ids"]
-    ):
-        continue
+    true_ids = (
+        set(row["matched_entity_ids"].split(","))
+        if row["matched_entity_ids"]
+        else set()
+    )
+
+    total_true += len(true_ids)
 
     s1row = s1.loc[s1_id]
 
@@ -303,80 +366,189 @@ for _, row in gt.iterrows():
 
     for rule in RULES:
 
-        key = (
+        lookup = (
             s1row["country"],
             s1row[rule]
         )
 
         candidates.update(
             indexes[rule].get(
-                key,
+                lookup,
                 []
             )
         )
 
-    true_ids = normalize_id_list(
-        row["matched_entity_ids"]
-    )
+    found = true_ids & candidates
+
+    retrieved_true += len(found)
 
     missing = true_ids - candidates
 
     for target_id in missing:
 
-        if target_id not in other.index:
-            continue
-
-        target = other.loc[target_id]
-
-        missed.append({
-
+        missed_pairs.append({
             "s1_id": s1_id,
-            "other_id": target_id,
-
-            "s1_name": s1row["business_name"],
-            "other_name": target["business_name"],
-
-            "s1_name_norm": s1row["name_norm"],
-            "other_name_norm": target["name_norm"],
-
-            "s1_address": s1row["business_address"],
-            "other_address": target["business_address"],
-
-            "name_similarity": sim(
-                s1row["name_norm"],
-                target["name_norm"]
-            ),
-
-            "address_similarity": sim(
-                s1row["address_norm"],
-                target["address_norm"]
-            ),
-
-            "country": s1row["country"]
+            "other_id": target_id
         })
 
 
+print("\n" + "=" * 80)
+print("BLOCKING CHECK")
+print("=" * 80)
+
+print(
+    "Total true matches:",
+    total_true
+)
+
+print(
+    "Retrieved:",
+    retrieved_true
+)
+
+print(
+    "Missed:",
+    len(missed_pairs)
+)
+
+print(
+    "Recall:",
+    f"{retrieved_true / total_true:.2%}"
+)
+
+
 # =========================================================
-# Results
+# 8. IMPORTANT:
+#    Now retrieve ONLY the missed IDs from S2/S3
 # =========================================================
 
-missed_df = pd.DataFrame(missed)
+missed_ids = set(
+    x["other_id"]
+    for x in missed_pairs
+)
+
+print(
+    "\nUnique missed entity IDs:",
+    len(missed_ids)
+)
+
+
+# =========================================================
+# 9. Scan S2/S3 again, but keep ONLY missed IDs
+# =========================================================
+
+print("\nRetrieving details of missed records...")
+
+missed_records = {}
+
+
+def retrieve_missed(filename):
+
+    path = f"{NORMALIZED_DIR}\\{filename}"
+
+    for chunk_no, chunk in enumerate(
+        pd.read_csv(
+            path,
+            sep="\t",
+            dtype=str,
+            usecols=[
+                "entity_id",
+                "business_name",
+                "business_address",
+                "country",
+                "name_norm",
+                "address_norm"
+            ],
+            chunksize=CHUNK_SIZE
+        )
+    ):
+
+        found = chunk[
+            chunk["entity_id"].isin(missed_ids)
+        ]
+
+        for _, row in found.iterrows():
+
+            missed_records[
+                row["entity_id"]
+            ] = row.to_dict()
+
+        del chunk
+
+
+retrieve_missed("train_source2.tsv")
+retrieve_missed("train_source3.tsv")
+
+print(
+    "Retrieved missed records:",
+    len(missed_records)
+)
+
+
+# =========================================================
+# 10. Calculate similarities
+# =========================================================
+
+results = []
+
+for pair in missed_pairs:
+
+    s1_id = pair["s1_id"]
+    other_id = pair["other_id"]
+
+    if other_id not in missed_records:
+        continue
+
+    a = s1.loc[s1_id]
+    b = missed_records[other_id]
+
+    results.append({
+
+        "s1_id": s1_id,
+        "other_id": other_id,
+
+        "s1_name": a["business_name"],
+        "other_name": b["business_name"],
+
+        "s1_address": a["business_address"],
+        "other_address": b["business_address"],
+
+        "name_similarity": similarity(
+            a["name_norm"],
+            b["name_norm"]
+        ),
+
+        "address_similarity": similarity(
+            a["address_norm"],
+            b["address_norm"]
+        ),
+
+        "country": a["country"]
+    })
+
+
+result_df = pd.DataFrame(results)
+
+
+# =========================================================
+# 11. Analyse
+# =========================================================
 
 print("\n" + "=" * 80)
 print("MISSED TRUE MATCH ANALYSIS")
 print("=" * 80)
 
 print(
-    "Missed true pairs:",
-    len(missed_df)
+    "Missed pairs:",
+    len(result_df)
 )
 
-if len(missed_df) > 0:
+if len(result_df) > 0:
 
     print("\nSimilarity statistics:")
 
     print(
-        missed_df[
+        result_df[
             [
                 "name_similarity",
                 "address_similarity"
@@ -392,20 +564,14 @@ if len(missed_df) > 0:
         )
     )
 
-    print("\nName similarity >= threshold:")
+    print("\nName similarity coverage:")
 
     for threshold in [
-        .3,
-        .4,
-        .5,
-        .6,
-        .7,
-        .8,
-        .9
+        .3, .4, .5, .6, .7, .8, .9
     ]:
 
         pct = (
-            missed_df["name_similarity"]
+            result_df["name_similarity"]
             >= threshold
         ).mean()
 
@@ -413,20 +579,14 @@ if len(missed_df) > 0:
             f">= {threshold:.1f}: {pct:.2%}"
         )
 
-    print("\nAddress similarity >= threshold:")
+    print("\nAddress similarity coverage:")
 
     for threshold in [
-        .3,
-        .4,
-        .5,
-        .6,
-        .7,
-        .8,
-        .9
+        .3, .4, .5, .6, .7, .8, .9
     ]:
 
         pct = (
-            missed_df["address_similarity"]
+            result_df["address_similarity"]
             >= threshold
         ).mean()
 
@@ -434,10 +594,14 @@ if len(missed_df) > 0:
             f">= {threshold:.1f}: {pct:.2%}"
         )
 
-    print("\nExamples of missed matches:")
+    print("\n" + "=" * 80)
+    print("30 LOWEST NAME-SIMILARITY MISSED MATCHES")
+    print("=" * 80)
 
     print(
-        missed_df[
+        result_df
+        .sort_values("name_similarity")
+        [
             [
                 "s1_name",
                 "other_name",
@@ -448,9 +612,6 @@ if len(missed_df) > 0:
                 "country"
             ]
         ]
-        .sort_values(
-            "name_similarity"
-        )
         .head(30)
         .to_string(index=False)
     )
@@ -461,16 +622,14 @@ if len(missed_df) > 0:
         r"\missed_matches.csv"
     )
 
-    missed_df.to_csv(
+    result_df.to_csv(
         output_path,
         index=False
     )
 
     print(
-        "\nSaved detailed analysis to:",
+        "\nDetailed results saved to:",
         output_path
     )
 
-else:
-
-    print("No missed matches found.")
+print("\nDone.")

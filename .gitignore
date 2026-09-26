@@ -1,3 +1,12 @@
 dataset/train/
 dataset/test/
 dataset/normalized/
+
+# Generated validation data
+dataset/validation/candidate_pairs_v3.tsv
+dataset/validation/v3_candidates.db
+dataset/validation/missed_matches.csv
+
+# Python cache
+__pycache__/
+*.pyc
